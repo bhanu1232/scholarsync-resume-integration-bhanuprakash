@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-core';
+import chromium from 'chrome-aws-lambda';
 import * as cheerio from 'cheerio';
 
 // CORS headers configuration
@@ -26,23 +27,17 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 // Function to fetch with Puppeteer
 async function fetchWithPuppeteer(url: string): Promise<string> {
+  const executablePath = await chromium.executablePath || process.env.CHROME_EXECUTABLE_PATH;
+
   const browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--disable-gpu',
-      '--window-size=1920x1080',
-    ],
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath,
+    headless: chromium.headless,
   });
 
   try {
     const page = await browser.newPage();
-    
-    // Set a realistic viewport
-    await page.setViewport({ width: 1920, height: 1080 });
     
     // Set user agent
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
