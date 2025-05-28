@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import fetch from 'node-fetch';
+import axios from 'axios';
 import * as cheerio from 'cheerio';
 
 // CORS headers configuration
@@ -21,25 +21,110 @@ interface Publication {
   citations: number;
 }
 
-// Function to fetch directly
-async function fetchScholarProfile(url: string): Promise<string> {
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-    },
-  });
+// Rate limiting configuration
+const RATE_LIMIT = {
+  maxRequests: 1,
+  timeWindow: 300000, // 5 minutes
+  requests: new Map<string, number[]>()
+};
 
-  if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+// Function to check rate limit
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const userRequests = RATE_LIMIT.requests.get(ip) || [];
+  
+  // Remove old requests outside the time window
+  const recentRequests = userRequests.filter(time => now - time < RATE_LIMIT.timeWindow);
+  
+  if (recentRequests.length >= RATE_LIMIT.maxRequests) {
+    return false;
   }
+  
+  recentRequests.push(now);
+  RATE_LIMIT.requests.set(ip, recentRequests);
+  return true;
+}
 
-  return await response.text();
+// Function to fetch with proxy
+async function fetchWithProxy(url: string): Promise<string> {
+  try {
+    // Use a more reliable proxy service
+    const proxyUrl = 'https://api.allorigins.win/raw?url=';
+    const encodedUrl = encodeURIComponent(url);
+    
+    console.log('Attempting to fetch from:', url);
+    
+    const response = await axios.get(`${proxyUrl}${encodedUrl}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'DNT': '1',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1'
+      },
+      timeout: 60000, // 60 second timeout
+      validateStatus: null, // Accept all status codes
+      responseType: 'text', // Ensure we get text response
+      maxRedirects: 5
+    });
+
+    console.log('Response status:', response.status);
+    
+    if (!response.data || typeof response.data !== 'string') {
+      console.error('Invalid response data:', response.data);
+      throw new Error('Invalid response from proxy service');
+    }
+
+    const html = response.data;
+
+    // Check for blocking indicators
+    if (html.includes('unusual traffic') || 
+        html.includes('captcha') || 
+        html.includes('Our systems have detected unusual traffic') ||
+        html.includes('Please show you\'re not a robot')) {
+      console.error('Access blocked by Google Scholar');
+      throw new Error('Access blocked by Google Scholar');
+    }
+
+    return html;
+  } catch (error: any) {
+    console.error('Proxy fetch error:', {
+      message: error.message,
+      status: error.response?.status,
+      statusText: error.response?.statusText,
+      data: error.response?.data
+    });
+    
+    if (error.response?.status === 500) {
+      throw new Error('Proxy service is currently unavailable. Please try again later.');
+    }
+    
+    throw error;
+  }
 }
 
 export async function POST(request: Request) {
   try {
+    // Get client IP for rate limiting
+    const ip = request.headers.get('x-forwarded-for') || 'unknown';
+    
+    // Check rate limit
+    if (!checkRateLimit(ip)) {
+      return NextResponse.json(
+        { error: 'Rate limit exceeded. Please try again in 5 minutes.' },
+        { 
+          status: 429,
+          headers: corsHeaders
+        }
+      );
+    }
+
     const { url } = await request.json();
 
     if (!url || !url.includes('scholar.google.com')) {
@@ -52,13 +137,17 @@ export async function POST(request: Request) {
       );
     }
 
-    // Fetch the profile page directly
-    const html = await fetchScholarProfile(url);
+    // Add delay between requests
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Fetch the profile page with proxy
+    const html = await fetchWithProxy(url);
     const $ = cheerio.load(html);
 
     // Extract profile information
     const name = $('#gsc_prf_in').text().trim();
     if (!name) {
+      console.error('Could not find profile name in HTML:', html.substring(0, 500));
       throw new Error('Could not find profile name - the page structure might have changed or access was blocked');
     }
 
@@ -98,11 +187,14 @@ export async function POST(request: Request) {
       headers: corsHeaders
     });
   } catch (error: any) {
-    console.error('Error fetching Google Scholar profile:', error);
+    console.error('Error fetching Google Scholar profile:', {
+      message: error.message,
+      stack: error.stack
+    });
     
-    if (error.message.includes('403')) {
+    if (error.message.includes('blocked') || error.message.includes('403')) {
       return NextResponse.json(
-        { error: 'Access to Google Scholar was blocked. Please try again later.' },
+        { error: 'Access to Google Scholar was blocked. Please try again in 10 minutes.' },
         { 
           status: 403,
           headers: corsHeaders
@@ -115,6 +207,16 @@ export async function POST(request: Request) {
         { error: 'Request timed out. Please try again.' },
         { 
           status: 504,
+          headers: corsHeaders
+        }
+      );
+    }
+
+    if (error.message.includes('Proxy service is currently unavailable')) {
+      return NextResponse.json(
+        { error: 'Proxy service is currently unavailable. Please try again in a few minutes.' },
+        { 
+          status: 503,
           headers: corsHeaders
         }
       );
