@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import axios from 'axios';
+import puppeteer from 'puppeteer';
 import * as cheerio from 'cheerio';
 
 // CORS headers configuration
@@ -21,66 +21,55 @@ interface Publication {
   citations: number;
 }
 
-// Retry configuration
-const MAX_RETRIES = 3;
-const INITIAL_RETRY_DELAY = 1000; // 1 second
-
-// List of common user agents to rotate
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15'
-];
-
-// Get a random user agent
-const getRandomUserAgent = () => {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-};
-
-// Sleep function for retry delays
+// Sleep function for delays
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Function to fetch with retries
-async function fetchWithRetry(url: string, retryCount = 0): Promise<any> {
+// Function to fetch with Puppeteer
+async function fetchWithPuppeteer(url: string): Promise<string> {
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--disable-gpu',
+      '--window-size=1920x1080',
+    ],
+  });
+
   try {
-    const userAgent = getRandomUserAgent();
-    const response = await axios.get(url, {
-      headers: {
-        'User-Agent': userAgent,
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Cache-Control': 'max-age=0',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Sec-Fetch-User': '?1',
-        'DNT': '1'
-      },
-      timeout: 10000,
-      // Add proxy configuration if available
-      proxy: process.env.HTTP_PROXY && process.env.PROXY_HOST ? {
-        host: process.env.PROXY_HOST,
-        port: parseInt(process.env.PROXY_PORT || '80'),
-        auth: process.env.PROXY_AUTH ? {
-          username: process.env.PROXY_USERNAME || '',
-          password: process.env.PROXY_PASSWORD || ''
-        } : undefined
-      } : undefined
+    const page = await browser.newPage();
+    
+    // Set a realistic viewport
+    await page.setViewport({ width: 1920, height: 1080 });
+    
+    // Set user agent
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    // Set extra headers
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     });
 
-    return response;
-  } catch (error: any) {
-    if (retryCount < MAX_RETRIES) {
-      const delay = INITIAL_RETRY_DELAY * Math.pow(2, retryCount);
-      console.log(`Retry attempt ${retryCount + 1} after ${delay}ms`);
-      await sleep(delay);
-      return fetchWithRetry(url, retryCount + 1);
-    }
-    throw error;
+    // Add random delay before navigation
+    await sleep(Math.random() * 2000 + 1000);
+
+    // Navigate to the page
+    await page.goto(url, {
+      waitUntil: 'networkidle0',
+      timeout: 30000,
+    });
+
+    // Add random delay after page load
+    await sleep(Math.random() * 2000 + 1000);
+
+    // Get the page content
+    const content = await page.content();
+    return content;
+  } finally {
+    await browser.close();
   }
 }
 
@@ -98,14 +87,9 @@ export async function POST(request: Request) {
       );
     }
 
-    // Fetch the profile page with retry logic
-    const response = await fetchWithRetry(url);
-
-    if (!response.data) {
-      throw new Error('Empty response from Google Scholar');
-    }
-
-    const $ = cheerio.load(response.data);
+    // Fetch the profile page with Puppeteer
+    const html = await fetchWithPuppeteer(url);
+    const $ = cheerio.load(html);
 
     // Extract profile information
     const name = $('#gsc_prf_in').text().trim();
@@ -152,39 +136,22 @@ export async function POST(request: Request) {
     console.error('Error scraping Google Scholar profile:', error);
     
     // More specific error messages
-    if (error.response) {
-      if (error.response.status === 403) {
-        return NextResponse.json(
-          { error: 'Access to Google Scholar was blocked. Please try again later or use a different network.' },
-          { 
-            status: 403,
-            headers: corsHeaders
-          }
-        );
-      }
-      if (error.response.status === 429) {
-        return NextResponse.json(
-          { error: 'Too many requests to Google Scholar. Please try again in a few minutes.' },
-          { 
-            status: 429,
-            headers: corsHeaders
-          }
-        );
-      }
+    if (error.message.includes('net::ERR_CONNECTION_REFUSED') || 
+        error.message.includes('net::ERR_CONNECTION_TIMED_OUT')) {
       return NextResponse.json(
-        { error: `Google Scholar returned an error: ${error.response.status}` },
+        { error: 'Connection to Google Scholar failed. Please try again later.' },
         { 
-          status: error.response.status,
+          status: 503,
           headers: corsHeaders
         }
       );
     }
-    
-    if (error.code === 'ECONNABORTED') {
+
+    if (error.message.includes('net::ERR_ABORTED')) {
       return NextResponse.json(
-        { error: 'Request to Google Scholar timed out. Please try again.' },
+        { error: 'Request was blocked. Please try again later or use a different network.' },
         { 
-          status: 504,
+          status: 403,
           headers: corsHeaders
         }
       );
