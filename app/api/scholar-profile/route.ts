@@ -20,17 +20,32 @@ export async function POST(request: Request) {
       );
     }
 
-    // Fetch the profile page
+    // Fetch the profile page with more realistic headers
     const response = await axios.get(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0'
       },
+      timeout: 10000, // 10 second timeout
     });
+
+    if (!response.data) {
+      throw new Error('Empty response from Google Scholar');
+    }
 
     const $ = cheerio.load(response.data);
 
     // Extract profile information
     const name = $('#gsc_prf_in').text().trim();
+    if (!name) {
+      throw new Error('Could not find profile name - the page structure might have changed or access was blocked');
+    }
+
     const citationCount = parseInt($('#gsc_rsb_st tbody tr:nth-child(1) td:nth-child(2)').text().trim()) || 0;
     
     // Extract research interests
@@ -66,8 +81,36 @@ export async function POST(request: Request) {
     });
   } catch (error: any) {
     console.error('Error scraping Google Scholar profile:', error);
+    
+    // More specific error messages
+    if (error.response) {
+      if (error.response.status === 403) {
+        return NextResponse.json(
+          { error: 'Access to Google Scholar was blocked. Please try again later.' },
+          { status: 403 }
+        );
+      }
+      if (error.response.status === 429) {
+        return NextResponse.json(
+          { error: 'Too many requests to Google Scholar. Please try again later.' },
+          { status: 429 }
+        );
+      }
+      return NextResponse.json(
+        { error: `Google Scholar returned an error: ${error.response.status}` },
+        { status: error.response.status }
+      );
+    }
+    
+    if (error.code === 'ECONNABORTED') {
+      return NextResponse.json(
+        { error: 'Request to Google Scholar timed out. Please try again.' },
+        { status: 504 }
+      );
+    }
+
     return NextResponse.json(
-      { error: 'Failed to fetch Google Scholar profile' },
+      { error: error.message || 'Failed to fetch Google Scholar profile' },
       { status: 500 }
     );
   }
