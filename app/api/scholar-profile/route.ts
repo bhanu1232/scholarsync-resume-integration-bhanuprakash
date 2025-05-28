@@ -1,6 +1,5 @@
 import { NextResponse } from 'next/server';
-import puppeteer from 'puppeteer-core';
-import chromium from 'chrome-aws-lambda';
+import fetch from 'node-fetch';
 import * as cheerio from 'cheerio';
 
 // CORS headers configuration
@@ -22,50 +21,21 @@ interface Publication {
   citations: number;
 }
 
-// Sleep function for delays
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-// Function to fetch with Puppeteer
-async function fetchWithPuppeteer(url: string): Promise<string> {
-  const executablePath = await chromium.executablePath || process.env.CHROME_EXECUTABLE_PATH;
-
-  const browser = await puppeteer.launch({
-    args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
-    executablePath,
-    headless: chromium.headless,
+// Function to fetch directly
+async function fetchScholarProfile(url: string): Promise<string> {
+  const response = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9',
+    },
   });
 
-  try {
-    const page = await browser.newPage();
-    
-    // Set user agent
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    // Set extra headers
-    await page.setExtraHTTPHeaders({
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    });
-
-    // Add random delay before navigation
-    await sleep(Math.random() * 2000 + 1000);
-
-    // Navigate to the page
-    await page.goto(url, {
-      waitUntil: 'networkidle0',
-      timeout: 30000,
-    });
-
-    // Add random delay after page load
-    await sleep(Math.random() * 2000 + 1000);
-
-    // Get the page content
-    const content = await page.content();
-    return content;
-  } finally {
-    await browser.close();
+  if (!response.ok) {
+    throw new Error(`HTTP error! status: ${response.status}`);
   }
+
+  return await response.text();
 }
 
 export async function POST(request: Request) {
@@ -82,8 +52,8 @@ export async function POST(request: Request) {
       );
     }
 
-    // Fetch the profile page with Puppeteer
-    const html = await fetchWithPuppeteer(url);
+    // Fetch the profile page directly
+    const html = await fetchScholarProfile(url);
     const $ = cheerio.load(html);
 
     // Extract profile information
@@ -128,25 +98,23 @@ export async function POST(request: Request) {
       headers: corsHeaders
     });
   } catch (error: any) {
-    console.error('Error scraping Google Scholar profile:', error);
+    console.error('Error fetching Google Scholar profile:', error);
     
-    // More specific error messages
-    if (error.message.includes('net::ERR_CONNECTION_REFUSED') || 
-        error.message.includes('net::ERR_CONNECTION_TIMED_OUT')) {
+    if (error.message.includes('403')) {
       return NextResponse.json(
-        { error: 'Connection to Google Scholar failed. Please try again later.' },
+        { error: 'Access to Google Scholar was blocked. Please try again later.' },
         { 
-          status: 503,
+          status: 403,
           headers: corsHeaders
         }
       );
     }
 
-    if (error.message.includes('net::ERR_ABORTED')) {
+    if (error.message.includes('timeout')) {
       return NextResponse.json(
-        { error: 'Request was blocked. Please try again later or use a different network.' },
+        { error: 'Request timed out. Please try again.' },
         { 
-          status: 403,
+          status: 504,
           headers: corsHeaders
         }
       );
