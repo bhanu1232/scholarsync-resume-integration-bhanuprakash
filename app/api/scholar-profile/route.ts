@@ -2,6 +2,18 @@ import { NextResponse } from 'next/server';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 
+// CORS headers configuration
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+};
+
+// Handle OPTIONS request for CORS preflight
+export async function OPTIONS() {
+  return NextResponse.json({}, { headers: corsHeaders });
+}
+
 interface Publication {
   title: string;
   authors: string;
@@ -79,7 +91,10 @@ export async function POST(request: Request) {
     if (!url || !url.includes('scholar.google.com')) {
       return NextResponse.json(
         { error: 'Invalid Google Scholar URL' },
-        { status: 400 }
+        { 
+          status: 400,
+          headers: corsHeaders
+        }
       );
     }
 
@@ -130,6 +145,8 @@ export async function POST(request: Request) {
       citationCount,
       researchInterests,
       publications,
+    }, {
+      headers: corsHeaders
     });
   } catch (error: any) {
     console.error('Error scraping Google Scholar profile:', error);
@@ -139,31 +156,46 @@ export async function POST(request: Request) {
       if (error.response.status === 403) {
         return NextResponse.json(
           { error: 'Access to Google Scholar was blocked. Please try again later or use a different network.' },
-          { status: 403 }
+          { 
+            status: 403,
+            headers: corsHeaders
+          }
         );
       }
       if (error.response.status === 429) {
         return NextResponse.json(
           { error: 'Too many requests to Google Scholar. Please try again in a few minutes.' },
-          { status: 429 }
+          { 
+            status: 429,
+            headers: corsHeaders
+          }
         );
       }
       return NextResponse.json(
         { error: `Google Scholar returned an error: ${error.response.status}` },
-        { status: error.response.status }
+        { 
+          status: error.response.status,
+          headers: corsHeaders
+        }
       );
     }
     
     if (error.code === 'ECONNABORTED') {
       return NextResponse.json(
         { error: 'Request to Google Scholar timed out. Please try again.' },
-        { status: 504 }
+        { 
+          status: 504,
+          headers: corsHeaders
+        }
       );
     }
 
     return NextResponse.json(
       { error: error.message || 'Failed to fetch Google Scholar profile' },
-      { status: 500 }
+      { 
+        status: 500,
+        headers: corsHeaders
+      }
     );
   }
 } 
